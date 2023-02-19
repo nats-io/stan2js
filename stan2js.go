@@ -115,7 +115,7 @@ func (c *Channel) validate() error {
 }
 
 type Stream struct {
-	Name         string        `yaml:"stream"`
+	Name         string        `yaml:"name"`
 	Context      string        `yaml:"context"`
 	Replicas     int           `yaml:"replicas"`
 	MaxAge       time.Duration `yaml:"max_age"`
