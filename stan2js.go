@@ -300,6 +300,8 @@ func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqM
 	if err != nil {
 		return 0, 0, err
 	}
+	defer sc.NatsConn().Close()
+	defer sc.Close()
 
 	nc, err := natscontext.Connect(ch.Stream.Context)
 	if err != nil {
@@ -396,6 +398,7 @@ func migrateSubscription(cl *Client, sb *Subscription, newseq uint64) error {
 	if err != nil {
 		return fmt.Errorf("NATS context %q: %w", sb.Consumer.Context, err)
 	}
+	defer nc.Close()
 
 	js, err := nc.JetStream()
 	if err != nil {
