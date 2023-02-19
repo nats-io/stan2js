@@ -31,6 +31,7 @@ func ReadConfig(path string) (*Config, error) {
 type Config struct {
 	STAN     string             `yaml:"stan"`
 	Cluster  string             `yaml:"cluster"`
+	Client   string             `yaml:"client"`
 	NATS     string             `yaml:"nats"`
 	Channels map[string]Channel `yaml:"channels"`
 	Clients  map[string]Client  `yaml:"clients"`
@@ -50,6 +51,10 @@ func (c *Config) Validate() error {
 		return errors.New("nats context is required")
 	}
 
+	if c.Client == "" {
+		c.Client = "stan2js"
+	}
+
 	streamChannels := make(map[string]string)
 	channelStreams := make(map[string]string)
 
@@ -57,6 +62,8 @@ func (c *Config) Validate() error {
 		if err := x.validate(); err != nil {
 			return fmt.Errorf("channel %s: %w", k, err)
 		}
+
+		x.Name = k
 
 		if x.Stream.Context == "" {
 			x.Stream.Context = c.NATS
@@ -79,6 +86,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("client %s: %w", k, err)
 		}
 
+		x.ID = k
+
 		if x.Context == "" {
 			x.Context = c.STAN
 		}
@@ -87,6 +96,9 @@ func (c *Config) Validate() error {
 			if _, ok := c.Channels[s.Channel]; !ok {
 				return fmt.Errorf("client %s: subscription %q: channel %q does not defined", k, n, s.Channel)
 			}
+
+			s.Name = n
+
 			if s.Consumer.Context == "" {
 				s.Consumer.Context = c.NATS
 			}
@@ -107,6 +119,7 @@ func (c *Config) Validate() error {
 }
 
 type Channel struct {
+	Name   string `yaml:"-"`
 	Stream Stream `yaml:"stream"`
 }
 
@@ -140,6 +153,7 @@ func (s *Stream) validate() error {
 }
 
 type Client struct {
+	ID            string                  `yaml:"-"`
 	Subscriptions map[string]Subscription `yaml:"subscriptions"`
 	Context       string                  `yaml:"context"`
 }
@@ -155,6 +169,7 @@ func (c *Client) validate() error {
 }
 
 type Subscription struct {
+	Name     string   `yaml:"-"`
 	Channel  string   `yaml:"channel"`
 	Queue    string   `yaml:"queue"`
 	Consumer Consumer `yaml:"consumer"`
@@ -213,223 +228,254 @@ type SubscriptionResult struct {
 	NewSeq       uint64
 }
 
-func Migrate(config *Config) (*Result, error) {
-	// Map of NATS connections by context name. There may be multiple
-	// STAN connections that use the same underlying NATS connection.
-	natsConns := make(map[string]*nats.Conn)
-	stanConns := make(map[string]stan.Conn)
-
-	// Initialize the NATS connection for STAN.
-	snc, err := natscontext.Connect(config.STAN)
+func newStan(cluster, client, context string) (stan.Conn, error) {
+	nc, err := natscontext.Connect(context)
 	if err != nil {
-		return nil, fmt.Errorf("NATS context %q: %w", config.STAN, err)
-	}
-	defer snc.Drain()
-	natsConns[config.STAN] = snc
-
-	if config.NATS != config.STAN {
-		// Initialize the NATS connection for STAN.
-		nc, err := natscontext.Connect(config.NATS)
-		if err != nil {
-			return nil, fmt.Errorf("NATS context %q: %w", config.NATS, err)
-		}
-		defer nc.Drain()
-		natsConns[config.NATS] = nc
+		return nil, err
 	}
 
-	// Initialize the set of STAN connections for each client.
-	for k, c := range config.Clients {
-		// Initialize a NATS connection for the context if it does not exist.
-		if _, ok := natsConns[c.Context]; !ok {
-			nc, err := natscontext.Connect(c.Context)
-			if err != nil {
-				return nil, fmt.Errorf("client %s: NATS context %q: %w", k, c.Context, err)
-			}
-			defer nc.Drain()
-		}
-
-		nc := natsConns[c.Context]
-		sc, err := stan.Connect(config.Cluster, k, stan.NatsConn(nc))
-		if err != nil {
-			return nil, fmt.Errorf("client %s: connect to STAN: %w", k, err)
-		}
-		defer sc.Close()
-
-		stanConns[k] = sc
-	}
-
-	// Using a one-of client ID "stan2js" for the channel migration.
-	sc, err := stan.Connect(config.Cluster, "stan2js", stan.NatsConn(snc))
+	sc, err := stan.Connect(cluster, client, stan.NatsConn(nc))
 	if err != nil {
-		return nil, fmt.Errorf("connect to STAN: %w", err)
+		nc.Close()
+		return nil, err
 	}
+
+	return sc, nil
+}
+
+func lastSubSeq(cluster string, client *Client, sub *Subscription) (uint64, error) {
+	sc, err := newStan(cluster, client.ID, client.Context)
+	if err != nil {
+		return 0, err
+	}
+	defer sc.NatsConn().Close()
 	defer sc.Close()
 
+	ch := sub.Channel
+	qn := sub.Queue
+
+	var ss stan.Subscription
+	seqch := make(chan uint64, 1)
+
+	// Setup the callback to get the last sequence for the durable.
+	cb := func(m *stan.Msg) {
+		ss.Close()
+		seqch <- m.Sequence
+	}
+
+	// Connect using the same durable name, but do not ack to prevent
+	// progressing the sub state.
+	if qn == "" {
+		ss, err = sc.Subscribe(
+			ch,
+			cb,
+			stan.DurableName(sub.Name),
+			stan.SetManualAckMode(),
+			stan.MaxInflight(1),
+		)
+	} else {
+		ss, err = sc.QueueSubscribe(
+			ch,
+			qn,
+			cb,
+			stan.DurableName(sub.Name),
+			stan.SetManualAckMode(),
+			stan.MaxInflight(1),
+		)
+	}
+
+	if err != nil {
+		return 0, fmt.Errorf("client %s: subscription %s: %w", client.ID, sub.Name, err)
+	}
+
+	return <-seqch, nil
+}
+
+func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqMap) (uint64, uint64, error) {
+	sc, err := newStan(context, cluster, id)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	nc, err := natscontext.Connect(ch.Stream.Context)
+	if err != nil {
+		return 0, 0, fmt.Errorf("channel %s: context %q: %w", ch.Name, ch.Stream.Context, err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		return 0, 0, fmt.Errorf("NATS context %q: %w", ch.Stream.Context, err)
+	}
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:         ch.Stream.Name,
+		Subjects:     []string{ch.Name},
+		Storage:      nats.FileStorage,
+		Replicas:     ch.Stream.Replicas,
+		MaxMsgs:      ch.Stream.MaxMsgs,
+		MaxBytes:     int64(ch.Stream.maxBytes),
+		MaxAge:       ch.Stream.MaxAge,
+		MaxConsumers: ch.Stream.MaxConsumers,
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("channel %s: create stream %q: %w", ch.Name, ch.Stream.Name, err)
+	}
+
+	seqch := make(chan uint64, 1)
+	done := make(chan error, 1)
+
+	// Create an ephemeral subscription to get the latest sequence
+	// in the channel. This will be used to know when the stream
+	// migration is done.
+	var sub stan.Subscription
+	sub, err = sc.Subscribe(ch.Name, func(m *stan.Msg) {
+		sub.Unsubscribe()
+		seqch <- m.Sequence
+	}, stan.StartWithLastReceived())
+	if err != nil {
+		return 0, 0, fmt.Errorf("channel %s: subscribe: %w", ch.Name, err)
+	}
+
+	oldseq := <-seqch
+
+	// Ephemeral subscription to get all messages.
+	sub, err = sc.Subscribe(ch.Name, func(m *stan.Msg) {
+		// Create a equivalent messgae for JetStream.
+		msg := nats.NewMsg(m.Subject)
+		msg.Data = m.Data
+
+		// For reference, set the channel sequence and timestamp
+		// since these will be new in the stream.
+		msg.Header.Set("Nats-Streaming-Sequence", fmt.Sprintf("%d", m.Sequence))
+		msg.Header.Set("Nats-Streaming-Timestamp", fmt.Sprintf("%d", m.Timestamp))
+
+		// Publish the message to the stream and receive the
+		// publish ack.
+		pa, err := js.PublishMsg(msg)
+		if err != nil {
+			sub.Unsubscribe()
+			done <- fmt.Errorf("channel %s: publish to stream: %w", ch.Name, err)
+		}
+
+		// For all durables, update the sequence map with the
+		// new stream sequence.
+		for k, sb := range durSeqMap.m[ch.Name] {
+			if sb[0] == m.Sequence {
+				durSeqMap.set(ch.Name, k[0], k[1], sb[0], pa.Sequence)
+				seqch <- pa.Sequence
+			}
+		}
+
+		// Once we have reached the last sequence, we are done.
+		if m.Sequence == oldseq {
+			sub.Unsubscribe()
+			seqch <- pa.Sequence
+		}
+	}, stan.DeliverAllAvailable())
+	if err != nil {
+		return 0, 0, fmt.Errorf("channel %s: migrate to stream: %w", ch.Name, err)
+	}
+
+	var newseq uint64
+	select {
+	case newseq = <-seqch:
+	case err := <-done:
+		return 0, 0, err
+	}
+
+	return oldseq, newseq, nil
+}
+
+func migrateSubscription(cl *Client, sb *Subscription, newseq uint64) error {
+	nc, err := natscontext.Connect(sb.Consumer.Context)
+	if err != nil {
+		return fmt.Errorf("NATS context %q: %w", sb.Consumer.Context, err)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("NATS context %q: %w", sb.Consumer.Context, err)
+	}
+
+	str := sb.Consumer.stream
+	qn := sb.Consumer.Queue
+
+	cc := &nats.ConsumerConfig{
+		Name:        sb.Consumer.Name,
+		Description: "Migrated from NATS Streaming",
+	}
+	if qn != "" {
+		cc.DeliverGroup = qn
+	}
+
+	cc.DeliverPolicy = nats.DeliverByStartSequencePolicy
+	cc.OptStartSeq = newseq //durSeqMap.m[sub.Channel][key][1]
+
+	_, err = js.AddConsumer(str, cc)
+	if err != nil {
+		return fmt.Errorf("client %s: add consumer %q for subscription %q: %s", cl.ID, sb.Consumer.Name, sb.Name, err)
+	}
+
+	return nil
+}
+
+type subSeqMap struct {
 	// channel -> [client, durable] -> [old seq, new seq]
-	durSeqMap := make(map[string]map[[2]string][2]uint64)
+	m map[string]map[[2]string][2]uint64
+}
+
+func (m *subSeqMap) set(ch string, cl, sub string, oseq, nseq uint64) {
+	if _, ok := m.m[ch]; !ok {
+		m.m[ch] = make(map[[2]string][2]uint64)
+	}
+
+	m.m[ch][[2]string{cl, sub}] = [2]uint64{oseq, nseq}
+}
+
+func Migrate(config *Config) (*Result, error) {
+	durSeqMap := &subSeqMap{
+		m: make(map[string]map[[2]string][2]uint64),
+	}
 
 	// The first step is to get the last sequence for each durable
 	// subscription across clients.
-	seqch := make(chan uint64)
-	for cn, client := range config.Clients {
-		for sn, s := range client.Subscriptions {
-			ch := s.Channel
-			qn := s.Queue
-
-			// Create the map for the channel if it does not exist.
-			if _, ok := durSeqMap[ch]; !ok {
-				durSeqMap[ch] = make(map[[2]string][2]uint64)
+	for _, cl := range config.Clients {
+		for _, sb := range cl.Subscriptions {
+			lastseq, err := lastSubSeq(config.Cluster, &cl, &sb)
+			if err != nil {
+				return nil, err
 			}
 
-			// Client ID and durable name pair.
-			key := [2]string{cn, sn}
-
-			var sub stan.Subscription
-
-			// Setup the callback to get the last sequence for the durable.
-			cb := func(m *stan.Msg) {
-				sub.Close()
-				seqch <- m.Sequence
-			}
-
-			// Connect using the same durable name, but do not ack to prevent
-			// progressing the sub state.
-			sc := stanConns[cn]
-			if qn == "" {
-				sub, err = sc.Subscribe(
-					ch,
-					cb,
-					stan.DurableName(sn),
-					stan.SetManualAckMode(),
-					stan.MaxInflight(1),
-				)
-			} else {
-				sub, err = sc.QueueSubscribe(
-					ch,
-					qn,
-					cb,
-					stan.DurableName(sn),
-					stan.SetManualAckMode(),
-					stan.MaxInflight(1),
-				)
-			}
-
-			// Get the last sequence and close the sub.
-			durSeqMap[ch][key] = [2]uint64{<-seqch, 0}
+			durSeqMap.set(sb.Channel, cl.ID, sb.Name, lastseq, 0)
 		}
 	}
 
-	done := make(chan error)
 	streamSeqs := make(map[string][2]uint64)
 
 	// For each channel, create a stream in order to migrate
 	// the channel messages.
-	for cn, ch := range config.Channels {
-		nc := natsConns[ch.Stream.Context]
-		js, err := nc.JetStream()
+	for _, ch := range config.Channels {
+		oldseq, newseq, err := migrateChannel(
+			config.STAN,
+			config.Cluster,
+			config.Client,
+			&ch,
+			durSeqMap,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("NATS context %q: %w", ch.Stream.Context, err)
-		}
-
-		_, err = js.AddStream(&nats.StreamConfig{
-			Name:         ch.Stream.Name,
-			Subjects:     []string{cn},
-			Storage:      nats.FileStorage,
-			Replicas:     ch.Stream.Replicas,
-			MaxMsgs:      ch.Stream.MaxMsgs,
-			MaxBytes:     int64(ch.Stream.maxBytes),
-			MaxAge:       ch.Stream.MaxAge,
-			MaxConsumers: ch.Stream.MaxConsumers,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("channel %s: create stream %q: %w", cn, ch.Stream.Name, err)
-		}
-
-		// Create an ephemeral subscription to get the latest sequence
-		// in the channel. This will be used to know when the stream
-		// migration is done.
-		var sub stan.Subscription
-		sub, err = sc.Subscribe(cn, func(m *stan.Msg) {
-			sub.Unsubscribe()
-			seqch <- m.Sequence
-		}, stan.StartWithLastReceived())
-		if err != nil {
-			return nil, fmt.Errorf("channel %s: subscribe: %w", cn, err)
-		}
-
-		lastseq := <-seqch
-
-		// Ephemeral subscription to get all messages.
-		sub, err = sc.Subscribe(cn, func(m *stan.Msg) {
-			// Create a equivalent messgae for JetStream.
-			msg := nats.NewMsg(m.Subject)
-			msg.Data = m.Data
-
-			// For reference, set the channel sequence and timestamp
-			// since these will be new in the stream.
-			msg.Header.Set("Nats-Streaming-Sequence", fmt.Sprintf("%d", m.Sequence))
-			msg.Header.Set("Nats-Streaming-Timestamp", fmt.Sprintf("%d", m.Timestamp))
-
-			// Publish the message to the stream and receive the
-			// publish ack.
-			pa, err := js.PublishMsg(msg)
-			if err != nil {
-				sub.Unsubscribe()
-				done <- fmt.Errorf("channel %s: publish to stream: %w", cn, err)
-			}
-
-			// For all durables, update the sequence map with the
-			// new stream sequence.
-			for key, s := range durSeqMap[cn] {
-				if s[0] == m.Sequence {
-					durSeqMap[cn][key] = [2]uint64{m.Sequence, pa.Sequence}
-				}
-			}
-
-			// Once we have reached the last sequence, we are done.
-			if m.Sequence == lastseq {
-				sub.Unsubscribe()
-				streamSeqs[ch.Stream.Name] = [2]uint64{lastseq, pa.Sequence}
-				done <- nil
-			}
-		}, stan.DeliverAllAvailable())
-		if err != nil {
-			return nil, fmt.Errorf("channel %s: migrate to stream: %w", cn, err)
-		}
-
-		if err := <-done; err != nil {
 			return nil, err
 		}
+
+		streamSeqs[ch.Stream.Name] = [2]uint64{oldseq, newseq}
 	}
 
 	// Migrate the durables.
 	for cn, client := range config.Clients {
 		for sn, sub := range client.Subscriptions {
-			nc := natsConns[sub.Consumer.Context]
-			js, err := nc.JetStream()
+			err := migrateSubscription(&client, &sub, durSeqMap.m[sub.Channel][[2]string{cn, sn}][1])
 			if err != nil {
-				return nil, fmt.Errorf("NATS context %q: %w", sub.Consumer.Context, err)
-			}
-
-			str := sub.Consumer.stream
-			qn := sub.Consumer.Queue
-
-			key := [2]string{cn, sn}
-
-			cc := &nats.ConsumerConfig{
-				Name:        sub.Consumer.Name,
-				Description: "Migrated from NATS Streaming",
-			}
-			if qn != "" {
-				cc.DeliverGroup = qn
-			}
-
-			cc.DeliverPolicy = nats.DeliverByStartSequencePolicy
-			cc.OptStartSeq = durSeqMap[sub.Channel][key][1]
-
-			_, err = js.AddConsumer(str, cc)
-			if err != nil {
-				return nil, fmt.Errorf("client %s: add consumer %q for subscription %q: %s", cn, sub.Consumer.Name, sn, err)
+				return nil, err
 			}
 		}
 	}
@@ -448,7 +494,8 @@ func Migrate(config *Config) (*Result, error) {
 	for cn, client := range config.Clients {
 		for sn, sub := range client.Subscriptions {
 			key := [2]string{cn, sn}
-			seqs := durSeqMap[sub.Channel][key]
+			seqs := durSeqMap.m[sub.Channel][key]
+
 			r.Subscriptions = append(r.Subscriptions, &SubscriptionResult{
 				Client:       cn,
 				Channel:      sub.Channel,
