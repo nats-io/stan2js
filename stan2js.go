@@ -29,12 +29,12 @@ func ReadConfig(path string) (*Config, error) {
 }
 
 type Config struct {
-	STAN     string             `yaml:"stan"`
-	Cluster  string             `yaml:"cluster"`
-	Client   string             `yaml:"client"`
-	NATS     string             `yaml:"nats"`
-	Channels map[string]Channel `yaml:"channels"`
-	Clients  map[string]Client  `yaml:"clients"`
+	STAN     string              `yaml:"stan"`
+	Cluster  string              `yaml:"cluster"`
+	Client   string              `yaml:"client"`
+	NATS     string              `yaml:"nats"`
+	Channels map[string]*Channel `yaml:"channels"`
+	Clients  map[string]*Client  `yaml:"clients"`
 }
 
 // Validate validates the configuration and sets default values
@@ -119,8 +119,8 @@ func (c *Config) Validate() error {
 }
 
 type Channel struct {
-	Name   string `yaml:"-"`
-	Stream Stream `yaml:"stream"`
+	Name   string  `yaml:"-"`
+	Stream *Stream `yaml:"stream"`
 }
 
 func (c *Channel) validate() error {
@@ -153,9 +153,9 @@ func (s *Stream) validate() error {
 }
 
 type Client struct {
-	ID            string                  `yaml:"-"`
-	Subscriptions map[string]Subscription `yaml:"subscriptions"`
-	Context       string                  `yaml:"context"`
+	ID            string                   `yaml:"-"`
+	Subscriptions map[string]*Subscription `yaml:"subscriptions"`
+	Context       string                   `yaml:"context"`
 }
 
 func (c *Client) validate() error {
@@ -169,13 +169,17 @@ func (c *Client) validate() error {
 }
 
 type Subscription struct {
-	Name     string   `yaml:"-"`
-	Channel  string   `yaml:"channel"`
-	Queue    string   `yaml:"queue"`
-	Consumer Consumer `yaml:"consumer"`
+	Name     string    `yaml:"-"`
+	Channel  string    `yaml:"channel"`
+	Queue    string    `yaml:"queue"`
+	Consumer *Consumer `yaml:"consumer"`
 }
 
 func (s *Subscription) validate() error {
+	if s.Consumer == nil {
+		s.Consumer = &Consumer{}
+	}
+
 	if err := s.Consumer.validate(); err != nil {
 		return err
 	}
@@ -442,7 +446,7 @@ func Migrate(config *Config) (*Result, error) {
 	// subscription across clients.
 	for _, cl := range config.Clients {
 		for _, sb := range cl.Subscriptions {
-			lastseq, err := lastSubSeq(config.Cluster, &cl, &sb)
+			lastseq, err := lastSubSeq(config.Cluster, cl, sb)
 			if err != nil {
 				return nil, fmt.Errorf("lastSubSeq: client %s: sub: %s, %w", cl.ID, sb.Name, err)
 			}
@@ -460,7 +464,7 @@ func Migrate(config *Config) (*Result, error) {
 			config.STAN,
 			config.Cluster,
 			config.Client,
-			&ch,
+			ch,
 			durSeqMap,
 		)
 		if err != nil {
@@ -473,7 +477,7 @@ func Migrate(config *Config) (*Result, error) {
 	// Migrate the durables.
 	for _, cl := range config.Clients {
 		for _, sb := range cl.Subscriptions {
-			err := migrateSubscription(&cl, &sb, durSeqMap.m[sb.Channel][[2]string{cl.ID, sb.Name}][1])
+			err := migrateSubscription(cl, sb, durSeqMap.m[sb.Channel][[2]string{cl.ID, sb.Name}][1])
 			if err != nil {
 				return nil, fmt.Errorf("migrateSubscription: client: %s: sub: %s: %w", cl.ID, sb.Name, err)
 			}
