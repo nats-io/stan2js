@@ -296,7 +296,7 @@ func lastSubSeq(cluster string, client *Client, sub *Subscription) (uint64, erro
 }
 
 func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqMap) (uint64, uint64, error) {
-	sc, err := newStan(context, cluster, id)
+	sc, err := newStan(cluster, id, context)
 	if err != nil {
 		return 0, 0, err
 	}
