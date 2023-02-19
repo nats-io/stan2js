@@ -79,6 +79,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("client %s: %w", k, err)
 		}
 
+		if x.Context == "" {
+			x.Context = c.STAN
+		}
+
 		for n, s := range x.Subscriptions {
 			if _, ok := c.Channels[s.Channel]; !ok {
 				return fmt.Errorf("client %s: subscription %q: channel %q does not defined", k, n, s.Channel)
@@ -239,7 +243,7 @@ func Migrate(config *Config) (*Result, error) {
 		if _, ok := natsConns[c.Context]; !ok {
 			nc, err := natscontext.Connect(c.Context)
 			if err != nil {
-				return nil, fmt.Errorf("NATS context %q: %w", c.Context, err)
+				return nil, fmt.Errorf("client %s: NATS context %q: %w", k, c.Context, err)
 			}
 			defer nc.Drain()
 		}
@@ -247,9 +251,10 @@ func Migrate(config *Config) (*Result, error) {
 		nc := natsConns[c.Context]
 		sc, err := stan.Connect(config.Cluster, k, stan.NatsConn(nc))
 		if err != nil {
-			return nil, fmt.Errorf("connect to STAN: %w", err)
+			return nil, fmt.Errorf("client %s: connect to STAN: %w", k, err)
 		}
 		defer sc.Close()
+
 		stanConns[k] = sc
 	}
 
