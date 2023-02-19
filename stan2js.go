@@ -294,7 +294,7 @@ func Migrate(config *Config) (*Result, error) {
 
 			// Connect using the same durable name, but do not ack to prevent
 			// progressing the sub state.
-			sc := stanConns[client.Context]
+			sc := stanConns[cn]
 			if qn == "" {
 				sub, err = sc.Subscribe(
 					ch,
