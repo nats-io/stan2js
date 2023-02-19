@@ -444,7 +444,7 @@ func Migrate(config *Config) (*Result, error) {
 		for _, sb := range cl.Subscriptions {
 			lastseq, err := lastSubSeq(config.Cluster, &cl, &sb)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("lastSubSeq: client %s: sub: %s, %w", cl.ID, sb.Name, err)
 			}
 
 			durSeqMap.set(sb.Channel, cl.ID, sb.Name, lastseq, 0)
@@ -464,18 +464,18 @@ func Migrate(config *Config) (*Result, error) {
 			durSeqMap,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("migrateChannel: channel: %s: %w", ch.Name, err)
 		}
 
 		streamSeqs[ch.Stream.Name] = [2]uint64{oldseq, newseq}
 	}
 
 	// Migrate the durables.
-	for cn, client := range config.Clients {
-		for sn, sub := range client.Subscriptions {
-			err := migrateSubscription(&client, &sub, durSeqMap.m[sub.Channel][[2]string{cn, sn}][1])
+	for _, cl := range config.Clients {
+		for _, sb := range cl.Subscriptions {
+			err := migrateSubscription(&cl, &sb, durSeqMap.m[sb.Channel][[2]string{cl.ID, sb.Name}][1])
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("migrateSubscription: client: %s: sub: %s: %w", cl.ID, sb.Name, err)
 			}
 		}
 	}
