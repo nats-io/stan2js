@@ -1,33 +1,26 @@
 # stan2js
 
-A one-shot data migration tool for NATS Streaming data to NATS JetStream.
+A one-time data migration tool for NATS Streaming (STAN) data to NATS JetStream.
 
 This will convert the following:
 
 - NATS Streaming channels to NATS JetStream streams
 - NATS Streaming durable subscriptions to NATS JetStream consumers
-  - By default these will be push-based
 
-## Usage
+Check out the [example](https://natsbyexample.com/examples/operations/stan2js/cli) to see the general workflow.
 
-The expected usage of this tool is to do a one-time, full migration of the NATS Streaming state. In practice, this would likely be performed once to validate the new JetStream-based client application(s) work with the migrated data during development and testing and then once for a production switch-over.
+Also if you need a general primer on migrating from NATS Streaming to NATS JetStream, check out the [recorded webinar](https://www.youtube.com/watch?v=yKI9YmLx_8A) and [slides](https://docs.google.com/presentation/d/e/2PACX-1vRJ5-gyW7Wignxt_l6sNrCWDXUevm7fChuJBrWIFWygxMMmEh7a_IjnYpkMuPMah-CZPN0Tk50Vhxti/pub?slide=id.g1fa73f6fc1d_0_206).
 
-The [NATS CLI](https://github.com/nats-io/natscli#installation) is required for the migration, but is also highly recommended as a familiar tool for NATS/JetStream applications.
+## Pre-requisites
 
-For this migration tool, we will use it to declare and save [configuration contexts](https://github.com/nats-io/natscli#configuration-contexts) to simplify connecting to the STAN and NATS deployments as well as authenticating across each of the client IDs while the migration is running.
-
-Once the contexts are saved and configuration file written (see below), usage of the tool is simply:
-
-```
-$ stan2js config.yaml
-```
+The [NATS CLI](https://github.com/nats-io/natscli#installation) is required in order to create [configuration contexts](https://github.com/nats-io/natscli#configuration-contexts). These contexts will be referenced in the stan2js configuration file and used during the migration.
 
 ### NATS Contexts
 
-As a quick primer a context can be created with the `nats context add` subcommand and supports the following options depending on the authentication and TLS requirements.
+As a quick primer a context can be created with the `nats context save` subcommand and supports the following options depending on the authentication and TLS requirements of the STAN deployment or the JetStream-enabled NATS deployment.
 
 ```sh
-$ nats context add NAME \
+$ nats context save NAME \
   --server=URL \
   --user=USER \
   --password=PASSWORD \
@@ -38,6 +31,22 @@ $ nats context add NAME \
   --tlsca=FILE
 ```
 
+## Install
+
+Download the latest version, for your platform, from the [releases page](https://github.com/nats-io/stan2js/releases).
+
+## Usage
+
+*The expected usage of this tool is to do a one-time, full migration of the NATS Streaming data. This does require downtime due to the exclusivity behavior of STAN connections with client IDs. The duration will depend on the amount of data in the channels being migrated. However, the time spent for the migration itself will typically be on the order of seconds even for large channels.*
+
+The first step is to save contexts pointing to the STAN deployment and the NATS deployment. If you intend to migrate channels to streams across multiple accounts, please create a [discussion](https://github.com/nats-io/stan2js/discussions), since the setup is a bit more involved.
+
+The second step is to write the stan2js configuration (see below). Once these two tasks are done, the tool can be invoked as follows.
+
+```sh
+$ stan2js config.yaml
+```
+
 ### Configuration
 
 A YAML-based configuration file is used to declare the set of channels and durable subscriptions (per client ID) to be migrated.
@@ -45,9 +54,11 @@ A YAML-based configuration file is used to declare the set of channels and durab
 The `channels` section declares channels by key such as `events` that should be migrated. An optional set of stream configuration can be declared, such as an alternative name, and stream limits analogous to those that could be defined for channels.
 
 ```yaml
-stan: stan-context      # Default STAN context to use.
-cluster: stan-cluster   # Name of the STAN cluster
-nats: nats-context      # Default NATS context to use.
+stan: stan              # Default STAN context to use.
+cluster: my-cluster     # Name of the STAN cluster as defined in the STAN configuration.
+client: stan2js         # Client ID to use for migrating the channels. Defaults to stan2js.
+                        # Note, this is separate from the client IDs used in your application.
+nats: nats              # Default JetStream-enabled NATS context to use.
 
 channels:
   # The `events` channel with all the options defined.
