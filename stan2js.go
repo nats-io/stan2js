@@ -513,6 +513,7 @@ func Migrate(config *Config) (*Result, error) {
 			Stream:          ch.Stream.Name,
 			ChannelFirstSeq: streamSeqs[ch.Stream.Name][0],
 			ChannelLastSeq:  streamSeqs[ch.Stream.Name][1],
+			StreamFirstSeq:  1,
 			StreamLastSeq:   streamSeqs[ch.Stream.Name][2],
 		})
 	}

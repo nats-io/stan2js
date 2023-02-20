@@ -47,7 +47,7 @@ func run() error {
 	tbl.SetOutputMirror(os.Stdout)
 	tbl.SetStyle(table.StyleRounded)
 
-	tbl.AppendHeader(table.Row{"Channels -> Streams"})
+	tbl.SetTitle("Channels -> Streams")
 
 	tbl.AppendHeader(table.Row{
 		"Name",
@@ -63,19 +63,22 @@ func run() error {
 		})
 	}
 
+	tbl.SortBy([]table.SortBy{
+		{Name: "Name", Mode: table.Asc},
+	})
+
 	tbl.Render()
 
 	tbl = table.NewWriter()
 	tbl.SetOutputMirror(os.Stdout)
 	tbl.SetStyle(table.StyleRounded)
 
-	tbl.AppendHeader(table.Row{"Subscriptions -> Consumers"})
+	tbl.SetTitle("Subscriptions -> Consumers")
 
 	tbl.AppendHeader(table.Row{
 		"Client",
 		"Channel -> Stream",
 		"Name",
-		"Consumer",
 		"Queue Name",
 		"Converted to Pull?",
 		"Last Sequence",
@@ -91,6 +94,11 @@ func run() error {
 			fmt.Sprintf("%d -> %d", s.OldSeq, s.NewSeq),
 		})
 	}
+
+	tbl.SortBy([]table.SortBy{
+		{Name: "Client", Mode: table.Asc},
+		{Name: "Name", Mode: table.Asc},
+	})
 
 	tbl.Render()
 
