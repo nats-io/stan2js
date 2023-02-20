@@ -369,7 +369,6 @@ func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqM
 		for k, sb := range durSeqMap.m[ch.Name] {
 			if sb[0] == m.Sequence {
 				durSeqMap.set(ch.Name, k[0], k[1], sb[0], pa.Sequence)
-				seqch <- pa.Sequence
 			}
 		}
 
@@ -410,10 +409,15 @@ func migrateSubscription(cl *Client, sb *Subscription, newseq uint64) error {
 
 	cc := &nats.ConsumerConfig{
 		Name:        sb.Consumer.Name,
+		AckPolicy:   nats.AckExplicitPolicy,
 		Description: "Migrated from NATS Streaming",
 	}
-	if qn != "" {
-		cc.DeliverGroup = qn
+
+	if !sb.Consumer.Pull {
+		cc.DeliverSubject = nats.NewInbox()
+		if qn != "" {
+			cc.DeliverGroup = qn
+		}
 	}
 
 	if newseq > 0 {
@@ -480,13 +484,13 @@ func Migrate(config *Config) (*Result, error) {
 
 		streamSeqs[ch.Stream.Name] = [2]uint64{oldseq, newseq}
 	}
+	fmt.Printf("%#v\n", durSeqMap.m)
 
 	// Migrate the durables.
 	for _, cl := range config.Clients {
 		for _, sb := range cl.Subscriptions {
 			err := migrateSubscription(cl, sb, durSeqMap.m[sb.Channel][[2]string{cl.ID, sb.Name}][1])
 			if err != nil {
-				fmt.Printf("%#v\n", durSeqMap.m)
 				return nil, fmt.Errorf("migrateSubscription: client: %s: sub: %s: %w", cl.ID, sb.Name, err)
 			}
 		}
