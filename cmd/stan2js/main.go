@@ -47,19 +47,19 @@ func run() error {
 	tbl.SetOutputMirror(os.Stdout)
 	tbl.SetStyle(table.StyleRounded)
 
+	tbl.AppendHeader(table.Row{"Channels -> Streams"})
+
 	tbl.AppendHeader(table.Row{
-		"Channel",
-		"Stream",
-		"Old Sequence",
-		"New Sequence",
+		"Name",
+		"First Sequence",
+		"Last Sequence",
 	})
 
 	for _, c := range result.Channels {
 		tbl.AppendRow(table.Row{
-			c.Channel,
-			c.Stream,
-			c.OldSeq,
-			c.NewSeq,
+			fmt.Sprintf("%s -> %s", c.Channel, c.Stream),
+			fmt.Sprintf("%d -> %d", c.ChannelFirstSeq, c.StreamFirstSeq),
+			fmt.Sprintf("%d -> %d", c.ChannelLastSeq, c.StreamLastSeq),
 		})
 	}
 
@@ -69,29 +69,26 @@ func run() error {
 	tbl.SetOutputMirror(os.Stdout)
 	tbl.SetStyle(table.StyleRounded)
 
+	tbl.AppendHeader(table.Row{"Subscriptions -> Consumers"})
+
 	tbl.AppendHeader(table.Row{
 		"Client",
-		"Channel",
-		"Stream",
-		"Subscription",
+		"Channel -> Stream",
+		"Name",
 		"Consumer",
-		"Queue",
-		"Pull",
-		"Old Sequence",
-		"New Sequence",
+		"Queue Name",
+		"Converted to Pull?",
+		"Last Sequence",
 	})
 
 	for _, s := range result.Subscriptions {
 		tbl.AppendRow(table.Row{
 			s.Client,
-			s.Channel,
-			s.Stream,
-			s.Subscription,
-			s.Consumer,
+			fmt.Sprintf("%s -> %s", s.Channel, s.Stream),
+			fmt.Sprintf("%s -> %s", s.Subscription, s.Consumer),
 			s.Queue,
 			s.Pull,
-			s.OldSeq,
-			s.NewSeq,
+			fmt.Sprintf("%d -> %d", s.OldSeq, s.NewSeq),
 		})
 	}
 

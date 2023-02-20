@@ -214,10 +214,12 @@ type Result struct {
 }
 
 type ChannelResult struct {
-	Channel string
-	Stream  string
-	OldSeq  uint64
-	NewSeq  uint64
+	Channel         string
+	Stream          string
+	ChannelFirstSeq uint64
+	ChannelLastSeq  uint64
+	StreamFirstSeq  uint64
+	StreamLastSeq   uint64
 }
 
 type SubscriptionResult struct {
@@ -295,23 +297,23 @@ func lastSubSeq(cluster string, client *Client, sub *Subscription) (uint64, erro
 	return <-seqch, nil
 }
 
-func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqMap) (uint64, uint64, error) {
+func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqMap) (uint64, uint64, uint64, error) {
 	sc, err := newStan(cluster, id, context)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer sc.NatsConn().Close()
 	defer sc.Close()
 
 	nc, err := natscontext.Connect(ch.Stream.Context)
 	if err != nil {
-		return 0, 0, fmt.Errorf("channel %s: context %q: %w", ch.Name, ch.Stream.Context, err)
+		return 0, 0, 0, fmt.Errorf("channel %s: context %q: %w", ch.Name, ch.Stream.Context, err)
 	}
 	defer nc.Close()
 
 	js, err := nc.JetStream()
 	if err != nil {
-		return 0, 0, fmt.Errorf("NATS context %q: %w", ch.Stream.Context, err)
+		return 0, 0, 0, fmt.Errorf("NATS context %q: %w", ch.Stream.Context, err)
 	}
 
 	_, err = js.AddStream(&nats.StreamConfig{
@@ -325,7 +327,7 @@ func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqM
 		MaxConsumers: ch.Stream.MaxConsumers,
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("channel %s: create stream %q: %w", ch.Name, ch.Stream.Name, err)
+		return 0, 0, 0, fmt.Errorf("channel %s: create stream %q: %w", ch.Name, ch.Stream.Name, err)
 	}
 
 	seqch := make(chan uint64, 1)
@@ -340,13 +342,21 @@ func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqM
 		seqch <- m.Sequence
 	}, stan.StartWithLastReceived())
 	if err != nil {
-		return 0, 0, fmt.Errorf("channel %s: subscribe: %w", ch.Name, err)
+		return 0, 0, 0, fmt.Errorf("channel %s: subscribe: %w", ch.Name, err)
 	}
 
 	oldseq := <-seqch
 
+	isfirst := true
+	var firstseq uint64
+
 	// Ephemeral subscription to get all messages.
 	sub, err = sc.Subscribe(ch.Name, func(m *stan.Msg) {
+		if isfirst {
+			isfirst = false
+			firstseq = m.Sequence
+		}
+
 		// Create a equivalent messgae for JetStream.
 		msg := nats.NewMsg(m.Subject)
 		msg.Data = m.Data
@@ -379,17 +389,17 @@ func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqM
 		}
 	}, stan.DeliverAllAvailable())
 	if err != nil {
-		return 0, 0, fmt.Errorf("channel %s: migrate to stream: %w", ch.Name, err)
+		return 0, 0, 0, fmt.Errorf("channel %s: migrate to stream: %w", ch.Name, err)
 	}
 
 	var newseq uint64
 	select {
 	case newseq = <-seqch:
 	case err := <-done:
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
-	return oldseq, newseq, nil
+	return firstseq, oldseq, newseq, nil
 }
 
 func migrateSubscription(cl *Client, sb *Subscription, newseq uint64) error {
@@ -466,12 +476,12 @@ func Migrate(config *Config) (*Result, error) {
 		}
 	}
 
-	streamSeqs := make(map[string][2]uint64)
+	streamSeqs := make(map[string][3]uint64)
 
 	// For each channel, create a stream in order to migrate
 	// the channel messages.
 	for _, ch := range config.Channels {
-		oldseq, newseq, err := migrateChannel(
+		firstseq, oldseq, newseq, err := migrateChannel(
 			config.STAN,
 			config.Cluster,
 			config.Client,
@@ -482,9 +492,8 @@ func Migrate(config *Config) (*Result, error) {
 			return nil, fmt.Errorf("migrateChannel: channel: %s: %w", ch.Name, err)
 		}
 
-		streamSeqs[ch.Stream.Name] = [2]uint64{oldseq, newseq}
+		streamSeqs[ch.Stream.Name] = [3]uint64{firstseq, oldseq, newseq}
 	}
-	fmt.Printf("%#v\n", durSeqMap.m)
 
 	// Migrate the durables.
 	for _, cl := range config.Clients {
@@ -500,10 +509,11 @@ func Migrate(config *Config) (*Result, error) {
 
 	for cn, ch := range config.Channels {
 		r.Channels = append(r.Channels, &ChannelResult{
-			Channel: cn,
-			Stream:  ch.Stream.Name,
-			OldSeq:  streamSeqs[ch.Stream.Name][0],
-			NewSeq:  streamSeqs[ch.Stream.Name][1],
+			Channel:         cn,
+			Stream:          ch.Stream.Name,
+			ChannelFirstSeq: streamSeqs[ch.Stream.Name][0],
+			ChannelLastSeq:  streamSeqs[ch.Stream.Name][1],
+			StreamLastSeq:   streamSeqs[ch.Stream.Name][2],
 		})
 	}
 
