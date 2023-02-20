@@ -416,8 +416,12 @@ func migrateSubscription(cl *Client, sb *Subscription, newseq uint64) error {
 		cc.DeliverGroup = qn
 	}
 
-	cc.DeliverPolicy = nats.DeliverByStartSequencePolicy
-	cc.OptStartSeq = newseq //durSeqMap.m[sub.Channel][key][1]
+	if newseq > 0 {
+		cc.DeliverPolicy = nats.DeliverByStartSequencePolicy
+		cc.OptStartSeq = newseq
+	} else {
+		cc.DeliverPolicy = nats.DeliverAllPolicy
+	}
 
 	_, err = js.AddConsumer(str, cc)
 	if err != nil {
@@ -482,6 +486,7 @@ func Migrate(config *Config) (*Result, error) {
 		for _, sb := range cl.Subscriptions {
 			err := migrateSubscription(cl, sb, durSeqMap.m[sb.Channel][[2]string{cl.ID, sb.Name}][1])
 			if err != nil {
+				fmt.Printf("%#v\n", durSeqMap.m)
 				return nil, fmt.Errorf("migrateSubscription: client: %s: sub: %s: %w", cl.ID, sb.Name, err)
 			}
 		}
