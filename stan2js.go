@@ -363,8 +363,9 @@ func migrateChannel(context, cluster, id string, ch *Channel, durSeqMap *subSeqM
 
 		// For reference, set the channel sequence and timestamp
 		// since these will be new in the stream.
+		msg.Header.Set("Nats-Streaming-Channel", m.Subject)
 		msg.Header.Set("Nats-Streaming-Sequence", fmt.Sprintf("%d", m.Sequence))
-		msg.Header.Set("Nats-Streaming-Timestamp", fmt.Sprintf("%d", m.Timestamp))
+		msg.Header.Set("Nats-Streaming-Timestamp", time.Unix(0, m.Timestamp).String())
 
 		// Publish the message to the stream and receive the
 		// publish ack.
