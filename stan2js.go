@@ -223,15 +223,15 @@ type ChannelResult struct {
 }
 
 type SubscriptionResult struct {
-	Client       string
-	Channel      string
-	Stream       string
-	Subscription string
-	Consumer     string
-	Queue        string
-	Pull         bool
-	OldSeq       uint64
-	NewSeq       uint64
+	Client         string
+	Channel        string
+	Stream         string
+	Subscription   string
+	Consumer       string
+	Queue          string
+	Pull           bool
+	ChannelNextSeq uint64
+	StreamNextSeq  uint64
 }
 
 func newStan(cluster, client, context string) (stan.Conn, error) {
@@ -524,15 +524,15 @@ func Migrate(config *Config) (*Result, error) {
 			seqs := durSeqMap.m[sub.Channel][key]
 
 			r.Subscriptions = append(r.Subscriptions, &SubscriptionResult{
-				Client:       cn,
-				Channel:      sub.Channel,
-				Stream:       sub.Consumer.stream,
-				Subscription: sn,
-				Consumer:     sub.Consumer.Name,
-				Queue:        sub.Consumer.Queue,
-				Pull:         sub.Consumer.Pull,
-				OldSeq:       seqs[0],
-				NewSeq:       seqs[1],
+				Client:         cn,
+				Channel:        sub.Channel,
+				Stream:         sub.Consumer.stream,
+				Subscription:   sn,
+				Consumer:       sub.Consumer.Name,
+				Queue:          sub.Consumer.Queue,
+				Pull:           sub.Consumer.Pull,
+				ChannelNextSeq: seqs[0],
+				StreamNextSeq:  seqs[1],
 			})
 		}
 	}

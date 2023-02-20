@@ -81,7 +81,7 @@ func run() error {
 		"Name",
 		"Queue Name",
 		"Converted to Pull?",
-		"Last Sequence",
+		"Next Sequence",
 	})
 
 	for _, s := range result.Subscriptions {
@@ -91,7 +91,7 @@ func run() error {
 			fmt.Sprintf("%s -> %s", s.Subscription, s.Consumer),
 			s.Queue,
 			s.Pull,
-			fmt.Sprintf("%d -> %d", s.OldSeq, s.NewSeq),
+			fmt.Sprintf("%d -> %d", s.ChannelNextSeq, s.StreamNextSeq),
 		})
 	}
 
